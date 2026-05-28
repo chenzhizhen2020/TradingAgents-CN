@@ -65,6 +65,53 @@ async def _llm_json(_rows, _model_name, _parameters):
 
 
 @pytest.mark.asyncio
+async def test_quick_batch_decision_runs_multi_agent_discussion_over_entire_batch():
+    db = _DB(
+        screening_docs=[
+            {"code": "000001", "name": "平安银行", "close": 12.3, "pct_chg": 1.2, "pe": 6.1, "pb": 0.8},
+            {"code": "000002", "name": "万科A", "close": 8.4, "pct_chg": -2.4, "pe": 9.2, "pb": 0.6},
+        ]
+    )
+    calls = []
+
+    async def agent_llm(role_key, _role_name, rows, discussion, _model_name, _parameters, final=False):
+        calls.append({
+            "role_key": role_key,
+            "symbols": [row["symbol"] for row in rows],
+            "prior_discussion_count": len(discussion),
+            "final": final,
+        })
+        if final:
+            return {
+                "items": [
+                    {"symbol": "000001", "action": "BUY", "confidence": 0.82, "target_price": 13.1, "reasoning": "多方和风控后仍具相对优势"},
+                    {"symbol": "000002", "action": "SELL", "confidence": 0.77, "target_price": 7.2, "reasoning": "空方和风控均指出下行压力"},
+                ]
+            }
+        return f"{role_key} 已横向比较 000001 与 000002"
+
+    service = QuickBatchDecisionService(db_getter=lambda: db, agent_llm=agent_llm)
+
+    result = await service.run("u1", _request(["000001", "000002"]))
+
+    assert [call["role_key"] for call in calls] == [
+        "market_analyst",
+        "fundamentals_analyst",
+        "bull_researcher",
+        "bear_researcher",
+        "risk_manager",
+        "portfolio_manager",
+    ]
+    assert all(call["symbols"] == ["000001", "000002"] for call in calls)
+    assert calls[-1]["prior_discussion_count"] == 5
+    assert calls[-1]["final"] is True
+    assert result["summary"]["discussion_rounds"] == 6
+    assert result["summary"]["discussion_agents"] == ["市场分析师", "基本面分析师", "看多研究员", "看空研究员", "风险经理", "组合决策员"]
+    assert len(result["discussion_trace"]) == 6
+    assert db.analysis_batches.inserted[0]["results_summary"]["discussion_trace"] == result["discussion_trace"]
+
+
+@pytest.mark.asyncio
 async def test_quick_batch_decision_returns_actions_and_persists_batch():
     db = _DB(
         screening_docs=[

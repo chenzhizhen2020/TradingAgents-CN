@@ -14,10 +14,14 @@ from app.models.analysis import BatchAnalysisRequest
 logger = logging.getLogger("app.services.quick_batch_decision_service")
 
 LLMDecider = Callable[[List[Dict[str, Any]], str, Dict[str, Any]], Awaitable[Any]]
+AgentLLM = Callable[
+    [str, str, List[Dict[str, Any]], List[Dict[str, str]], str, Dict[str, Any], bool],
+    Awaitable[Any],
+]
 
 
 class QuickBatchDecisionService:
-    """Build a fast batch decision from quote/valuation rows and one LLM call."""
+    """Build a fast batch decision from batch quote rows and multi-agent discussion."""
 
     max_symbols = 10
 
@@ -25,10 +29,12 @@ class QuickBatchDecisionService:
         self,
         db_getter: Optional[Callable[[], Any]] = None,
         llm_decider: Optional[LLMDecider] = None,
+        agent_llm: Optional[AgentLLM] = None,
         quote_fetcher: Optional[Callable[[List[str]], Awaitable[Dict[str, Dict[str, Any]]]]] = None,
     ):
         self._db_getter = db_getter
         self._llm_decider = llm_decider
+        self._agent_llm = agent_llm
         self._quote_fetcher = quote_fetcher
 
     async def run(self, user_id: str, request: BatchAnalysisRequest) -> Dict[str, Any]:
@@ -52,8 +58,9 @@ class QuickBatchDecisionService:
 
         available_rows = [data_by_symbol[symbol] for symbol in symbols if symbol in data_by_symbol]
         decision_map: Dict[str, Dict[str, Any]] = {}
+        discussion_trace: List[Dict[str, str]] = []
         if available_rows:
-            raw_decision = await self._decide_with_llm(available_rows, model_name, parameters)
+            raw_decision, discussion_trace = await self._decide_with_agents(available_rows, model_name, parameters)
             decision_map = self._parse_llm_decisions(raw_decision)
 
         items: List[Dict[str, Any]] = []
@@ -85,9 +92,12 @@ class QuickBatchDecisionService:
             "summary": {
                 "action_counts": self._count_actions(items),
                 "model_name": model_name,
+                "discussion_rounds": len(discussion_trace),
+                "discussion_agents": [entry["agent"] for entry in discussion_trace],
                 "elapsed_seconds": round(time.perf_counter() - started, 3),
                 "generated_at": generated_at.isoformat(),
             },
+            "discussion_trace": discussion_trace,
         }
 
         await db.analysis_batches.insert_one({
@@ -178,10 +188,127 @@ class QuickBatchDecisionService:
             "data_source": row.get("source") or row.get("data_source") or "local",
         }
 
+    async def _decide_with_agents(
+        self,
+        rows: List[Dict[str, Any]],
+        model_name: str,
+        parameters: Dict[str, Any],
+    ) -> tuple[Any, List[Dict[str, str]]]:
+        if self._llm_decider:
+            raw_decision = await self._llm_decider(rows, model_name, parameters)
+            return raw_decision, [{
+                "agent": "组合决策员",
+                "role": "portfolio_manager",
+                "content": "使用兼容决策器直接生成结果",
+            }]
+
+        discussion: List[Dict[str, str]] = []
+        roles = self._discussion_roles(parameters)
+        raw_decision: Any = None
+
+        for index, role in enumerate(roles):
+            is_final = index == len(roles) - 1
+            response = await self._call_agent(
+                role["key"],
+                role["name"],
+                rows,
+                discussion,
+                model_name,
+                parameters,
+                final=is_final,
+            )
+            content = self._agent_content(response)
+            discussion.append({
+                "agent": role["name"],
+                "role": role["key"],
+                "content": content,
+            })
+            if is_final:
+                raw_decision = response
+
+        return raw_decision, discussion
+
+    def _discussion_roles(self, parameters: Dict[str, Any]) -> List[Dict[str, str]]:
+        analyst_roles = [
+            {
+                "key": "market_analyst",
+                "name": "市场分析师",
+                "instruction": "从价格、涨跌幅、成交额、换手率、量比等维度横向比较整批股票，指出相对强弱和异常信号。",
+            },
+            {
+                "key": "fundamentals_analyst",
+                "name": "基本面分析师",
+                "instruction": "从 PE、PE_TTM、PB、市值等估值指标横向比较整批股票，指出估值优势、估值陷阱和缺失信息。",
+            },
+        ]
+        debate_roles = [
+            {
+                "key": "bull_researcher",
+                "name": "看多研究员",
+                "instruction": "基于前面分析，为整批股票中最值得买入或持有的标的提出看多论据，并比较排序。",
+            },
+            {
+                "key": "bear_researcher",
+                "name": "看空研究员",
+                "instruction": "基于前面分析，为整批股票中应卖出或回避的标的提出看空论据，并指出主要风险。",
+            },
+        ]
+        risk_roles = [
+            {
+                "key": "risk_manager",
+                "name": "风险经理",
+                "instruction": "综合多空观点，对整批股票做风险校验，指出哪些结论证据不足、哪些需要降置信度。",
+            },
+            {
+                "key": "portfolio_manager",
+                "name": "组合决策员",
+                "instruction": "综合所有角色讨论，为每只股票输出最终 BUY、SELL 或 HOLD，必须覆盖全部可用股票。",
+            },
+        ]
+
+        return analyst_roles + debate_roles + risk_roles
+
+    async def _call_agent(
+        self,
+        role_key: str,
+        role_name: str,
+        rows: List[Dict[str, Any]],
+        discussion: List[Dict[str, str]],
+        model_name: str,
+        parameters: Dict[str, Any],
+        final: bool = False,
+    ) -> Any:
+        if self._agent_llm:
+            return await self._agent_llm(role_key, role_name, rows, discussion, model_name, parameters, final)
+        return await self._call_openai_compatible_agent(
+            role_key,
+            role_name,
+            rows,
+            discussion,
+            model_name,
+            parameters,
+            final=final,
+        )
+
     async def _decide_with_llm(self, rows: List[Dict[str, Any]], model_name: str, parameters: Dict[str, Any]) -> Any:
         if self._llm_decider:
             return await self._llm_decider(rows, model_name, parameters)
         return await self._call_openai_compatible_llm(rows, model_name, parameters)
+
+    async def _call_openai_compatible_agent(
+        self,
+        role_key: str,
+        role_name: str,
+        rows: List[Dict[str, Any]],
+        discussion: List[Dict[str, str]],
+        model_name: str,
+        parameters: Dict[str, Any],
+        final: bool = False,
+    ) -> str:
+        llm = self._create_llm(model_name)
+        prompt = self._build_agent_prompt(role_key, role_name, rows, discussion, parameters, final=final)
+        response = await llm.ainvoke(prompt)
+        return getattr(response, "content", response)
 
     async def _call_openai_compatible_llm(
         self,
@@ -189,6 +316,12 @@ class QuickBatchDecisionService:
         model_name: str,
         parameters: Dict[str, Any],
     ) -> str:
+        llm = self._create_llm(model_name)
+        prompt = self._build_prompt(rows, parameters)
+        response = await llm.ainvoke(prompt)
+        return getattr(response, "content", response)
+
+    def _create_llm(self, model_name: str) -> Any:
         try:
             from app.services.simple_analysis_service import get_provider_and_url_by_model_sync
             from tradingagents.llm_clients.openai_client import OpenAIClient
@@ -196,19 +329,54 @@ class QuickBatchDecisionService:
             raise ValueError(f"快速批量决策模型初始化失败: {e}")
 
         provider_info = get_provider_and_url_by_model_sync(model_name)
-        llm = OpenAIClient(
+        return OpenAIClient(
             model=model_name,
             provider=provider_info.get("provider") or "qwen",
             base_url=provider_info.get("backend_url"),
             api_key=provider_info.get("api_key"),
             temperature=0,
-            max_tokens=2000,
+            max_tokens=3000,
             timeout=600,
         ).get_llm()
 
-        prompt = self._build_prompt(rows, parameters)
-        response = await llm.ainvoke(prompt)
-        return getattr(response, "content", response)
+    def _build_agent_prompt(
+        self,
+        role_key: str,
+        role_name: str,
+        rows: List[Dict[str, Any]],
+        discussion: List[Dict[str, str]],
+        parameters: Dict[str, Any],
+        final: bool = False,
+    ) -> str:
+        language = parameters.get("language") or "zh-CN"
+        role = next((item for item in self._discussion_roles(parameters) if item["key"] == role_key), None)
+        instruction = role["instruction"] if role else "横向比较整批股票并给出观点。"
+        discussion_text = "\n\n".join(
+            f"{entry['agent']}:\n{entry['content']}" for entry in discussion
+        ) or "暂无，当前是第一位发言者。"
+
+        if final:
+            output_rule = (
+                "你是最后的组合决策员。只输出严格 JSON，不要 Markdown，不要额外解释。\n"
+                "JSON 格式: {\"items\":[{\"symbol\":\"000001\",\"action\":\"BUY|SELL|HOLD\","
+                "\"confidence\":0.0到1.0,\"target_price\":数字或null,\"reasoning\":\"结合多角色讨论的一句话原因\"}]}\n"
+                "必须覆盖股票数据中每一只 symbol。"
+            )
+        else:
+            output_rule = (
+                "输出一段结构化中文讨论，必须横向比较股票数据中的所有 symbol，"
+                "不要输出最终 JSON，不要只分析单只股票。"
+            )
+
+        return (
+            f"你是{role_name}，正在参与一个批量股票多 Agent 讨论。\n"
+            f"语言: {language}\n"
+            f"职责: {instruction}\n"
+            "讨论对象: 下方股票数据中的全部 A 股，必须作为一个组合一起比较，不允许逐只孤立给结论。\n"
+            f"股票数据: {json.dumps(rows, ensure_ascii=False, default=str)}\n\n"
+            f"已有讨论:\n{discussion_text}\n\n"
+            f"{output_rule}"
+        )
 
     def _build_prompt(self, rows: List[Dict[str, Any]], parameters: Dict[str, Any]) -> str:
         language = parameters.get("language") or "zh-CN"
@@ -220,6 +388,14 @@ class QuickBatchDecisionService:
             "\"confidence\":0.0到1.0,\"target_price\":数字或null,\"reasoning\":\"一句话原因\"}]}\n"
             f"股票数据: {json.dumps(rows, ensure_ascii=False, default=str)}"
         )
+
+    def _agent_content(self, response: Any) -> str:
+        if isinstance(response, str):
+            return response.strip()
+        try:
+            return json.dumps(response, ensure_ascii=False, default=str)
+        except TypeError:
+            return str(response)
 
     def _parse_llm_decisions(self, raw_decision: Any) -> Dict[str, Dict[str, Any]]:
         payload = raw_decision

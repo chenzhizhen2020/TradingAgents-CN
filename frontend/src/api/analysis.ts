@@ -171,9 +171,16 @@ export interface QuickBatchDecisionResult extends BatchSummary {
   summary: {
     action_counts: Record<'BUY' | 'SELL' | 'HOLD', number>
     model_name: string
+    discussion_rounds?: number
+    discussion_agents?: string[]
     elapsed_seconds: number
     generated_at: string
   }
+  discussion_trace?: Array<{
+    agent: string
+    role: string
+    content: string
+  }>
 }
 
 export interface AnalysisBatchListItem {

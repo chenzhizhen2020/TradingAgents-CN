@@ -52,6 +52,7 @@
 
       <div class="quick-model-line">
         <span>模型：{{ quickDecisionResult.summary?.model_name || '-' }}</span>
+        <span>讨论：{{ quickDecisionResult.summary?.discussion_rounds || 0 }} 轮</span>
         <span>耗时：{{ formatElapsed(quickDecisionResult.summary?.elapsed_seconds) }}</span>
         <span>生成时间：{{ formatGeneratedAt(quickDecisionResult.summary?.generated_at) }}</span>
       </div>
@@ -87,6 +88,21 @@
         </el-table-column>
         <el-table-column prop="reasoning" label="理由" min-width="240" />
       </el-table>
+
+      <el-collapse v-if="quickDecisionResult.discussion_trace?.length" class="discussion-collapse">
+        <el-collapse-item title="多Agent讨论记录" name="discussion">
+          <div class="discussion-list">
+            <div
+              v-for="entry in quickDecisionResult.discussion_trace"
+              :key="`${entry.role}-${entry.agent}`"
+              class="discussion-item"
+            >
+              <div class="discussion-agent">{{ entry.agent }}</div>
+              <div class="discussion-content">{{ entry.content }}</div>
+            </div>
+          </div>
+        </el-collapse-item>
+      </el-collapse>
     </el-card>
 
     <!-- 股票列表输入区域 -->
@@ -834,6 +850,35 @@ const metricEntries = (metrics?: Record<string, any>) => {
       color: var(--el-text-color-regular);
       font-size: 12px;
       line-height: 1.5;
+    }
+
+    .discussion-collapse {
+      margin-top: 16px;
+    }
+
+    .discussion-list {
+      display: grid;
+      gap: 12px;
+    }
+
+    .discussion-item {
+      border: 1px solid var(--el-border-color-light);
+      border-radius: 8px;
+      padding: 12px;
+      background: var(--el-fill-color-lighter);
+    }
+
+    .discussion-agent {
+      font-weight: 600;
+      color: var(--el-text-color-primary);
+      margin-bottom: 6px;
+    }
+
+    .discussion-content {
+      color: var(--el-text-color-regular);
+      font-size: 13px;
+      line-height: 1.6;
+      white-space: pre-wrap;
     }
   }
 
