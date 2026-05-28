@@ -437,7 +437,7 @@ class QuickBatchDecisionService:
             base_url=provider_info.get("backend_url"),
             api_key=provider_info.get("api_key"),
             temperature=0,
-            max_tokens=3000,
+            max_tokens=4500,
             timeout=600,
         ).get_llm()
 
@@ -461,8 +461,16 @@ class QuickBatchDecisionService:
             output_rule = (
                 "你是最后的组合决策员。只输出严格 JSON，不要 Markdown，不要额外解释。\n"
                 "JSON 格式: {\"items\":[{\"symbol\":\"000001\",\"action\":\"BUY|SELL|HOLD\","
-                "\"confidence\":0.0到1.0,\"target_price\":数字或null,\"reasoning\":\"结合多角色讨论的一句话原因\"}]}\n"
-                "必须覆盖股票数据中每一只 symbol。"
+                "\"confidence\":0.0到1.0,\"target_price\":数字,"
+                "\"price_prediction\":{\"current_price\":数字,\"target_price\":数字,"
+                "\"stop_loss_price\":数字,\"take_profit_price\":数字,\"watch_price\":数字,"
+                "\"expected_change_percent\":数字,\"time_horizon\":\"2-6周|1-3个月|3-6个月\","
+                "\"basis\":\"价格预测依据\"},"
+                "\"reasoning\":\"结合多角色讨论的一句话原因\"}]}\n"
+                "必须覆盖股票数据中每一只 symbol。每只股票必须提供 price_prediction，"
+                "所有价格字段必须是数字且不能为 null。BUY 的 target_price 表示上涨目标价；"
+                "SELL 的 target_price 表示下行/回落目标价，watch_price 表示重新观察或止跌确认价；"
+                "HOLD 的 target_price 表示合理价值中枢，watch_price 表示突破或跌破观察价。"
             )
         else:
             output_rule = (
@@ -487,7 +495,12 @@ class QuickBatchDecisionService:
             "为每只股票给出 BUY、SELL 或 HOLD。只输出严格 JSON，不要 Markdown。\n"
             f"语言: {language}\n"
             "JSON 格式: {\"items\":[{\"symbol\":\"000001\",\"action\":\"BUY|SELL|HOLD\","
-            "\"confidence\":0.0到1.0,\"target_price\":数字或null,\"reasoning\":\"一句话原因\"}]}\n"
+            "\"confidence\":0.0到1.0,\"target_price\":数字,"
+            "\"price_prediction\":{\"current_price\":数字,\"target_price\":数字,"
+            "\"stop_loss_price\":数字,\"take_profit_price\":数字,\"watch_price\":数字,"
+            "\"expected_change_percent\":数字,\"time_horizon\":\"2-6周|1-3个月|3-6个月\","
+            "\"basis\":\"价格预测依据\"},\"reasoning\":\"一句话原因\"}]}\n"
+            "每只股票必须提供 price_prediction，所有价格字段必须是数字且不能为 null。\n"
             f"股票数据: {json.dumps(rows, ensure_ascii=False, default=str)}"
         )
 
@@ -526,11 +539,13 @@ class QuickBatchDecisionService:
                 "action": action,
                 "confidence": self._bounded_float(item.get("confidence"), default=0.5),
                 "target_price": self._safe_optional_float(item.get("target_price")),
+                "price_prediction": item.get("price_prediction"),
                 "reasoning": str(item.get("reasoning") or "模型未提供原因").strip(),
             }
         return decisions
 
     def _build_item(self, symbol: str, data: Dict[str, Any], decision: Dict[str, Any]) -> Dict[str, Any]:
+        price_prediction = self._normalize_price_prediction(symbol, data, decision)
         return {
             "symbol": symbol,
             "stock_code": symbol,
@@ -539,7 +554,8 @@ class QuickBatchDecisionService:
             "action": decision["action"],
             "action_label": self._action_label(decision["action"]),
             "confidence": decision["confidence"],
-            "target_price": decision["target_price"],
+            "target_price": price_prediction["target_price"],
+            "price_prediction": price_prediction,
             "reasoning": decision["reasoning"],
             "key_metrics": {
                 key: data.get(key)
@@ -559,11 +575,64 @@ class QuickBatchDecisionService:
             "action_label": "持有",
             "confidence": 0.0,
             "target_price": None,
+            "price_prediction": None,
             "reasoning": "未获取到行情/估值数据，无法生成可靠快速决策",
             "key_metrics": {},
             "data_status": "data_missing",
             "data_source": None,
         }
+
+    def _normalize_price_prediction(
+        self,
+        symbol: str,
+        data: Dict[str, Any],
+        decision: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        raw = decision.get("price_prediction")
+        if not isinstance(raw, dict):
+            raw = {}
+
+        current_price = self._safe_optional_float(raw.get("current_price"))
+        if current_price is None:
+            current_price = self._safe_optional_float(data.get("close"))
+        target_price = self._safe_optional_float(raw.get("target_price"))
+        if target_price is None:
+            target_price = self._safe_optional_float(decision.get("target_price"))
+
+        prediction = {
+            "current_price": current_price,
+            "target_price": target_price,
+            "stop_loss_price": self._safe_optional_float(raw.get("stop_loss_price")),
+            "take_profit_price": self._safe_optional_float(raw.get("take_profit_price")),
+            "watch_price": self._safe_optional_float(raw.get("watch_price")),
+            "expected_change_percent": self._safe_optional_float(raw.get("expected_change_percent")),
+            "time_horizon": str(raw.get("time_horizon") or "").strip(),
+            "basis": str(raw.get("basis") or "").strip(),
+        }
+
+        if prediction["expected_change_percent"] is None and current_price and target_price:
+            prediction["expected_change_percent"] = round((target_price - current_price) / current_price * 100, 2)
+
+        missing_fields = [
+            key
+            for key in (
+                "current_price",
+                "target_price",
+                "stop_loss_price",
+                "take_profit_price",
+                "watch_price",
+                "expected_change_percent",
+            )
+            if prediction[key] is None
+        ]
+        if not prediction["time_horizon"]:
+            missing_fields.append("time_horizon")
+        if not prediction["basis"]:
+            missing_fields.append("basis")
+        if missing_fields:
+            raise ValueError(f"快速批量决策模型未返回 {symbol} 的完整价格预测信息: {', '.join(missing_fields)}")
+
+        return prediction
 
     def _count_actions(self, items: List[Dict[str, Any]]) -> Dict[str, int]:
         counts = {"BUY": 0, "SELL": 0, "HOLD": 0}
@@ -590,6 +659,15 @@ class QuickBatchDecisionService:
         try:
             if value is None or value == "":
                 return None
+            if isinstance(value, str):
+                value = (
+                    value.replace("¥", "")
+                    .replace("￥", "")
+                    .replace("$", "")
+                    .replace("元", "")
+                    .replace("%", "")
+                    .strip()
+                )
             return float(value)
         except (TypeError, ValueError):
             return None

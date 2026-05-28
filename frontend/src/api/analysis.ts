@@ -128,12 +128,24 @@ export interface BatchSummaryItem {
   action?: 'BUY' | 'SELL' | 'HOLD' | string | null
   action_label?: string | null
   target_price?: number | null
+  price_prediction?: PricePrediction | null
   confidence?: number | null
   reasoning?: string | null
   key_metrics?: Record<string, any>
   data_status?: string
   data_source?: string | null
   error_message?: string | null
+}
+
+export interface PricePrediction {
+  current_price: number
+  target_price: number
+  stop_loss_price: number
+  take_profit_price: number
+  watch_price: number
+  expected_change_percent: number
+  time_horizon: string
+  basis: string
 }
 
 export interface BatchCostSummary {

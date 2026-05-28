@@ -84,9 +84,15 @@
           {{ row.recommendation || row.action_label || actionText(row.action) || '-' }}
         </template>
       </el-table-column>
-      <el-table-column prop="target_price" label="目标价格" width="120">
+      <el-table-column label="价格预测" min-width="220">
         <template #default="{ row }">
-          {{ formatPrice(row.target_price) }}
+          <div v-if="row.price_prediction" class="price-prediction-list">
+            <span>目标 {{ formatPrice(row.price_prediction.target_price) }}</span>
+            <span>止损 {{ formatPrice(row.price_prediction.stop_loss_price) }}</span>
+            <span>止盈 {{ formatPrice(row.price_prediction.take_profit_price) }}</span>
+            <span>观察 {{ formatPrice(row.price_prediction.watch_price) }}</span>
+          </div>
+          <span v-else>{{ formatPrice(row.target_price) }}</span>
         </template>
       </el-table-column>
       <el-table-column prop="confidence" label="模型置信度" width="130">
@@ -287,6 +293,14 @@ const openReport = (row: any) => {
 
   .error-text {
     color: var(--el-color-danger);
+  }
+
+  .price-prediction-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 10px;
+    font-size: 12px;
+    line-height: 1.5;
   }
 }
 </style>

@@ -73,9 +73,18 @@
             {{ formatConfidence(row.confidence) }}
           </template>
         </el-table-column>
-        <el-table-column prop="target_price" label="目标价" width="100">
+        <el-table-column label="价格预测" min-width="260">
           <template #default="{ row }">
-            {{ formatPrice(row.target_price) }}
+            <div v-if="row.price_prediction" class="price-prediction-list">
+              <span>现价 {{ formatPrice(row.price_prediction.current_price) }}</span>
+              <span>目标 {{ formatPrice(row.price_prediction.target_price) }}</span>
+              <span>止损 {{ formatPrice(row.price_prediction.stop_loss_price) }}</span>
+              <span>止盈 {{ formatPrice(row.price_prediction.take_profit_price) }}</span>
+              <span>观察 {{ formatPrice(row.price_prediction.watch_price) }}</span>
+              <span>预期 {{ formatPercent(row.price_prediction.expected_change_percent) }}</span>
+              <span>{{ row.price_prediction.time_horizon }}</span>
+            </div>
+            <span v-else>{{ formatPrice(row.target_price) }}</span>
           </template>
         </el-table-column>
         <el-table-column label="关键指标" min-width="220">
@@ -88,6 +97,11 @@
           </template>
         </el-table-column>
         <el-table-column prop="reasoning" label="理由" min-width="240" />
+        <el-table-column label="预测依据" min-width="220">
+          <template #default="{ row }">
+            {{ row.price_prediction?.basis || '-' }}
+          </template>
+        </el-table-column>
       </el-table>
 
       <el-collapse v-if="quickDecisionResult.discussion_trace?.length" class="discussion-collapse">
@@ -762,6 +776,12 @@ const formatConfidence = (value?: number | null) => {
   return numeric <= 1 ? `${(numeric * 100).toFixed(1)}%` : `${numeric.toFixed(1)}%`
 }
 
+const formatPercent = (value?: number | null) => {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '-'
+  const numeric = Number(value)
+  return `${numeric > 0 ? '+' : ''}${numeric.toFixed(2)}%`
+}
+
 const formatElapsed = (value?: number | null) => {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return '-'
   return `${Number(value).toFixed(1)}秒`
@@ -848,6 +868,15 @@ const metricEntries = (metrics?: Record<string, any>) => {
       display: flex;
       flex-wrap: wrap;
       gap: 6px 10px;
+      color: var(--el-text-color-regular);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    .price-prediction-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px 10px;
       color: var(--el-text-color-regular);
       font-size: 12px;
       line-height: 1.5;
