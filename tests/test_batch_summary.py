@@ -58,6 +58,39 @@ class _DB:
 
 
 @pytest.mark.asyncio
+async def test_batch_summary_service_returns_summary_contract(monkeypatch):
+    from app.services.batch_summary_service import BatchSummaryService
+
+    db = _DB(
+        batches=[{
+            "batch_id": "B0",
+            "user_id": "u1",
+            "title": "抽取服务测试",
+            "total_tasks": 1,
+            "mapping": [{"task_id": "T1", "symbol": "000001"}],
+        }],
+        tasks=[{
+            "task_id": "T1",
+            "batch_id": "B0",
+            "stock_code": "000001",
+            "stock_name": "平安银行",
+            "status": "completed",
+            "result": {"decision": {"action": "BUY", "target_price": "12.34", "confidence": 0.9}},
+        }],
+        reports=[],
+    )
+    monkeypatch.setattr("app.services.batch_summary_service.get_mongo_db", lambda: db)
+
+    summary = await BatchSummaryService().get_batch_summary("u1", "B0")
+
+    assert summary["batch_id"] == "B0"
+    assert summary["status"] == "completed"
+    assert summary["items"][0]["recommendation"] == "买入"
+    assert summary["items"][0]["target_price"] == 12.34
+    assert db.analysis_batches.last_update["update"]["$set"]["results_summary"]["batch_id"] == "B0"
+
+
+@pytest.mark.asyncio
 async def test_batch_summary_counts_partial_success_and_extracts_fields(monkeypatch):
     db = _DB(
         batches=[{
