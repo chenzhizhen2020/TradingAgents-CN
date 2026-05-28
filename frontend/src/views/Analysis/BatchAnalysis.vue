@@ -32,6 +32,63 @@
 
     <BatchSummaryCard v-if="currentBatchSummary" :summary="currentBatchSummary" />
 
+    <el-card v-if="quickDecisionResult" class="quick-decision-card" shadow="never">
+      <template #header>
+        <div class="quick-decision-header">
+          <div>
+            <h3>快速批量决策</h3>
+            <p>{{ quickDecisionResult.title || '快速批量决策' }}</p>
+          </div>
+          <div class="quick-decision-meta">
+            <el-tag type="success">买入 {{ quickDecisionCounts.BUY }}</el-tag>
+            <el-tag type="danger">卖出 {{ quickDecisionCounts.SELL }}</el-tag>
+            <el-tag type="info">持有 {{ quickDecisionCounts.HOLD }}</el-tag>
+            <el-tag :type="quickDecisionResult.status === 'completed' ? 'success' : 'warning'">
+              {{ quickDecisionResult.status === 'completed' ? '已完成' : '部分成功' }}
+            </el-tag>
+          </div>
+        </div>
+      </template>
+
+      <div class="quick-model-line">
+        <span>模型：{{ quickDecisionResult.summary?.model_name || '-' }}</span>
+        <span>耗时：{{ formatElapsed(quickDecisionResult.summary?.elapsed_seconds) }}</span>
+        <span>生成时间：{{ formatGeneratedAt(quickDecisionResult.summary?.generated_at) }}</span>
+      </div>
+
+      <el-table :data="quickDecisionResult.items || []" size="small" style="width: 100%">
+        <el-table-column prop="stock_code" label="股票代码" width="110" />
+        <el-table-column prop="stock_name" label="股票名称" min-width="120" />
+        <el-table-column label="决策" width="100">
+          <template #default="{ row }">
+            <el-tag size="small" :type="quickActionTagType(row.action)">
+              {{ row.action_label || actionText(row.action) }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="confidence" label="置信度" width="100">
+          <template #default="{ row }">
+            {{ formatConfidence(row.confidence) }}
+          </template>
+        </el-table-column>
+        <el-table-column prop="target_price" label="目标价" width="100">
+          <template #default="{ row }">
+            {{ formatPrice(row.target_price) }}
+          </template>
+        </el-table-column>
+        <el-table-column label="关键指标" min-width="220">
+          <template #default="{ row }">
+            <div class="metric-list">
+              <span v-for="metric in metricEntries(row.key_metrics)" :key="metric.label">
+                {{ metric.label }} {{ metric.value }}
+              </span>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column prop="reasoning" label="理由" min-width="240" />
+      </el-table>
+    </el-card>
+
     <!-- 股票列表输入区域 -->
     <div class="analysis-container">
       <el-row :gutter="24">
@@ -173,13 +230,25 @@
 
               <!-- 操作按钮 -->
               <div class="form-section">
-                <div class="action-buttons" style="display: flex; justify-content: center; align-items: center; width: 100%; text-align: center;">
+                <div class="action-buttons" style="display: flex; justify-content: center; align-items: center; gap: 16px; flex-wrap: wrap; width: 100%; text-align: center;">
+                  <el-button
+                    type="success"
+                    size="large"
+                    @click="submitQuickBatchDecision"
+                    :loading="quickDecisionLoading"
+                    :disabled="stockCodes.length === 0 || submitting"
+                    class="quick-decision-btn"
+                    style="width: 320px; height: 56px; font-size: 18px; font-weight: 700; border-radius: 16px;"
+                  >
+                    <el-icon><TrendCharts /></el-icon>
+                    快速批量决策 ({{ stockCodes.length }}只)
+                  </el-button>
                   <el-button
                     type="primary"
                     size="large"
                     @click="submitBatchAnalysis"
                     :loading="submitting"
-                    :disabled="stockCodes.length === 0"
+                    :disabled="stockCodes.length === 0 || quickDecisionLoading"
                     class="submit-btn large-batch-btn"
                     style="width: 320px; height: 56px; font-size: 18px; font-weight: 700; border-radius: 16px;"
                   >
@@ -292,12 +361,12 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Files, TrendCharts, Check, Close } from '@element-plus/icons-vue'
 import { ANALYSTS, DEFAULT_ANALYSTS, convertAnalystNamesToIds } from '@/constants/analysts'
 import { configApi } from '@/api/config'
-import { analysisApi, type BatchSummary } from '@/api/analysis'
+import { analysisApi, type BatchSummary, type QuickBatchDecisionResult } from '@/api/analysis'
 import { useRouter, useRoute } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import ModelConfig from '@/components/ModelConfig.vue'
@@ -310,11 +379,13 @@ const router = useRouter()
 const route = useRoute()
 
 const submitting = ref(false)
+const quickDecisionLoading = ref(false)
 const stockInput = ref('')
 const stockCodes = ref<string[]>([])  // 保留用于表单绑定
 const symbols = ref<string[]>([])     // 标准化后的代码列表
 const invalidCodes = ref<string[]>([])
 const currentBatchSummary = ref<BatchSummary | null>(null)
+const quickDecisionResult = ref<QuickBatchDecisionResult | null>(null)
 let summaryTimer: number | null = null
 
 // 模型设置
@@ -404,6 +475,54 @@ const startSummaryPolling = (batchId: string) => {
   }, 10000)
 }
 
+const validateBatchInputs = () => {
+  if (!batchForm.title) {
+    ElMessage.warning('请输入批次标题')
+    return false
+  }
+
+  if (stockCodes.value.length === 0) {
+    ElMessage.warning('请输入股票代码')
+    return false
+  }
+
+  if (stockCodes.value.length > 10) {
+    ElMessage.warning('单次批量分析最多支持10只股票，请减少股票数量')
+    return false
+  }
+
+  return true
+}
+
+const buildBatchRequest = () => ({
+  title: batchForm.title,
+  description: batchForm.description,
+  symbols: symbols.value,
+  stock_codes: symbols.value,
+  parameters: {
+    market_type: (() => {
+      const markets = new Set(symbols.value.map(s => getMarketByStockCode(s)))
+      return markets.size === 1 ? Array.from(markets)[0] : undefined
+    })(),
+    research_depth: batchForm.depth,
+    selected_analysts: convertAnalystNamesToIds(batchForm.analysts),
+    include_sentiment: batchForm.includeSentiment,
+    include_risk: batchForm.includeRisk,
+    language: batchForm.language,
+    quick_analysis_model: modelSettings.value.quickAnalysisModel,
+    deep_analysis_model: modelSettings.value.deepAnalysisModel
+  }
+})
+
+const quickDecisionCounts = computed(() => {
+  const counts = quickDecisionResult.value?.summary?.action_counts
+  return {
+    BUY: counts?.BUY || 0,
+    SELL: counts?.SELL || 0,
+    HOLD: counts?.HOLD || 0
+  }
+})
+
 // 初始化模型设置
 const initializeModelSettings = async () => {
   try {
@@ -491,6 +610,7 @@ const removeStock = (index: number) => {
   
   // 更新输入框
   stockInput.value = stockCodes.value.join('\n')
+  symbols.value = [...stockCodes.value]
   
   // 从无效列表中移除
   const invalidIndex = invalidCodes.value.indexOf(removedCode)
@@ -520,20 +640,7 @@ const validateStocks = async () => {
 }
 
 const submitBatchAnalysis = async () => {
-  if (!batchForm.title) {
-    ElMessage.warning('请输入批次标题')
-    return
-  }
-
-  if (stockCodes.value.length === 0) {
-    ElMessage.warning('请输入股票代码')
-    return
-  }
-
-  if (stockCodes.value.length > 10) {
-    ElMessage.warning('单次批量分析最多支持10只股票，请减少股票数量')
-    return
-  }
+  if (!validateBatchInputs()) return
 
   try {
     await ElMessageBox.confirm(
@@ -548,29 +655,7 @@ const submitBatchAnalysis = async () => {
 
     submitting.value = true
 
-    // 准备批量分析请求参数（真实API调用）
-    const batchRequest = {
-      title: batchForm.title,
-      description: batchForm.description,
-      symbols: symbols.value,
-      stock_codes: symbols.value,  // 兼容字段
-      parameters: {
-        // 若全部代码可识别为同一市场则携带；否则省略让后端自行判断
-        market_type: (() => {
-          const markets = new Set(symbols.value.map(s => getMarketByStockCode(s)))
-          return markets.size === 1 ? Array.from(markets)[0] : undefined
-        })(),
-        research_depth: batchForm.depth,
-        selected_analysts: convertAnalystNamesToIds(batchForm.analysts),
-        include_sentiment: batchForm.includeSentiment,
-        include_risk: batchForm.includeRisk,
-        language: batchForm.language,
-        quick_analysis_model: modelSettings.value.quickAnalysisModel,
-        deep_analysis_model: modelSettings.value.deepAnalysisModel
-      }
-    }
-
-    const response = await analysisApi.startBatchAnalysis(batchRequest)
+    const response = await analysisApi.startBatchAnalysis(buildBatchRequest())
 
     if (!response?.success) {
       throw new Error(response?.message || '批量分析提交失败')
@@ -610,6 +695,89 @@ const submitBatchAnalysis = async () => {
   }
 }
 
+const submitQuickBatchDecision = async () => {
+  if (!validateBatchInputs()) return
+
+  try {
+    quickDecisionLoading.value = true
+    quickDecisionResult.value = null
+    stopSummaryPolling()
+
+    const response = await analysisApi.startQuickBatchDecision(buildBatchRequest())
+    if (!response?.success) {
+      throw new Error(response?.message || '快速批量决策失败')
+    }
+
+    quickDecisionResult.value = response.data
+    currentBatchSummary.value = response.data
+
+    const counts = response.data.summary?.action_counts || { BUY: 0, SELL: 0, HOLD: 0 }
+    ElMessage.success(`快速决策完成：买入 ${counts.BUY || 0} / 卖出 ${counts.SELL || 0} / 持有 ${counts.HOLD || 0}`)
+  } catch (error: any) {
+    ElMessage.error(error.message || '快速批量决策失败')
+  } finally {
+    quickDecisionLoading.value = false
+  }
+}
+
+const actionText = (action?: string | null) => {
+  if (action === 'BUY') return '买入'
+  if (action === 'SELL') return '卖出'
+  if (action === 'HOLD') return '持有'
+  return '-'
+}
+
+const quickActionTagType = (action?: string | null): 'success' | 'warning' | 'danger' | 'info' => {
+  if (action === 'BUY') return 'success'
+  if (action === 'SELL') return 'danger'
+  if (action === 'HOLD') return 'info'
+  return 'warning'
+}
+
+const formatPrice = (value?: number | null) => {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '-'
+  return Number(value).toFixed(2)
+}
+
+const formatConfidence = (value?: number | null) => {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '-'
+  const numeric = Number(value)
+  return numeric <= 1 ? `${(numeric * 100).toFixed(1)}%` : `${numeric.toFixed(1)}%`
+}
+
+const formatElapsed = (value?: number | null) => {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '-'
+  return `${Number(value).toFixed(1)}秒`
+}
+
+const formatGeneratedAt = (value?: string | null) => {
+  if (!value) return '-'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return date.toLocaleString()
+}
+
+const metricEntries = (metrics?: Record<string, any>) => {
+  const labels: Record<string, string> = {
+    close: '现价',
+    pct_chg: '涨跌幅',
+    pe: 'PE',
+    pe_ttm: 'PETTM',
+    pb: 'PB',
+    turnover_rate: '换手',
+    volume_ratio: '量比',
+    total_mv: '总市值'
+  }
+
+  return Object.entries(metrics || {})
+    .filter(([, value]) => value !== null && value !== undefined && value !== '')
+    .slice(0, 6)
+    .map(([key, value]) => ({
+      label: labels[key] || key,
+      value: Number.isFinite(Number(value)) ? Number(value).toFixed(2) : String(value)
+    }))
+}
+
 </script>
 
 <style lang="scss" scoped>
@@ -617,6 +785,57 @@ const submitBatchAnalysis = async () => {
   min-height: 100vh;
   background: var(--el-bg-color-page);
   padding: 24px;
+
+  .quick-decision-card {
+    margin: 0 0 24px;
+    border-radius: 8px;
+
+    .quick-decision-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      flex-wrap: wrap;
+
+      h3 {
+        margin: 0;
+        font-size: 18px;
+        font-weight: 600;
+      }
+
+      p {
+        margin: 4px 0 0;
+        color: var(--el-text-color-secondary);
+        font-size: 13px;
+      }
+    }
+
+    .quick-decision-meta {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .quick-model-line {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      flex-wrap: wrap;
+      color: var(--el-text-color-secondary);
+      font-size: 13px;
+      margin-bottom: 14px;
+    }
+
+    .metric-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px 10px;
+      color: var(--el-text-color-regular);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+  }
 
   .page-header {
     margin-bottom: 32px;
@@ -958,6 +1177,42 @@ const submitBatchAnalysis = async () => {
 }
 
 .large-batch-btn.el-button span {
+  font-size: 18px !important;
+  font-weight: 700 !important;
+}
+
+.quick-decision-btn.el-button {
+  width: 320px !important;
+  height: 56px !important;
+  font-size: 18px !important;
+  font-weight: 700 !important;
+  background: linear-gradient(135deg, #10b981 0%, #047857 100%) !important;
+  border: none !important;
+  border-radius: 16px !important;
+  transition: all 0.3s ease !important;
+  box-shadow: 0 4px 15px rgba(16, 185, 129, 0.2) !important;
+  min-width: 320px !important;
+  max-width: 320px !important;
+}
+
+.quick-decision-btn.el-button:hover {
+  transform: translateY(-3px) !important;
+  box-shadow: 0 12px 30px rgba(16, 185, 129, 0.35) !important;
+  background: linear-gradient(135deg, #10b981 0%, #047857 100%) !important;
+}
+
+.quick-decision-btn.el-button:disabled {
+  opacity: 0.6 !important;
+  transform: none !important;
+  box-shadow: 0 4px 15px rgba(16, 185, 129, 0.1) !important;
+}
+
+.quick-decision-btn.el-button .el-icon {
+  margin-right: 8px !important;
+  font-size: 20px !important;
+}
+
+.quick-decision-btn.el-button span {
   font-size: 18px !important;
   font-weight: 700 !important;
 }

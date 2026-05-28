@@ -18,6 +18,7 @@ from app.services.analysis_service import get_analysis_service
 from app.services.simple_analysis_service import get_simple_analysis_service
 from app.services.websocket_manager import get_websocket_manager
 from app.services.deepseek_balance_service import deepseek_balance_service
+from app.services.quick_batch_decision_service import QuickBatchDecisionService
 from app.models.analysis import (
     SingleAnalysisRequest, BatchAnalysisRequest, AnalysisParameters,
     AnalysisTaskResponse, AnalysisBatchResponse, AnalysisHistoryQuery
@@ -909,6 +910,26 @@ async def submit_batch_analysis(
     except Exception as e:
         logger.error(f"❌ [批量分析] 提交失败: {e}", exc_info=True)
         raise HTTPException(status_code=400, detail=str(e))
+
+@router.post("/batch/quick-decision", response_model=Dict[str, Any])
+async def submit_quick_batch_decision(
+    request: BatchAnalysisRequest,
+    user: dict = Depends(get_current_user)
+):
+    """直接返回最多10只A股的快速批量买入/卖出/持有决策。"""
+    try:
+        result = await QuickBatchDecisionService().run(user["id"], request)
+        return {
+            "success": True,
+            "data": result,
+            "message": "快速批量决策完成"
+        }
+    except ValueError as e:
+        logger.warning(f"⚠️ [快速批量决策] 请求失败: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"❌ [快速批量决策] 执行失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 # 兼容性：保留原有端点
 @router.post("/analyze")

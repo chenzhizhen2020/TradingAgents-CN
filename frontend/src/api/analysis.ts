@@ -125,8 +125,14 @@ export interface BatchSummaryItem {
   stock_name?: string
   status: string
   recommendation?: string | null
+  action?: 'BUY' | 'SELL' | 'HOLD' | string | null
+  action_label?: string | null
   target_price?: number | null
   confidence?: number | null
+  reasoning?: string | null
+  key_metrics?: Record<string, any>
+  data_status?: string
+  data_source?: string | null
   error_message?: string | null
 }
 
@@ -145,6 +151,7 @@ export interface BatchCostSummary {
 
 export interface BatchSummary {
   batch_id: string
+  batch_type?: string
   title: string
   description?: string
   status: string
@@ -157,6 +164,16 @@ export interface BatchSummary {
   official_cost_delta_by_currency?: Record<string, number>
   local_estimated_cost_by_currency?: Record<string, number>
   items: BatchSummaryItem[]
+}
+
+export interface QuickBatchDecisionResult extends BatchSummary {
+  batch_type: 'quick_decision'
+  summary: {
+    action_counts: Record<'BUY' | 'SELL' | 'HOLD', number>
+    model_name: string
+    elapsed_seconds: number
+    generated_at: string
+  }
 }
 
 export interface AnalysisBatchListItem {
@@ -245,6 +262,20 @@ export const analysisApi = {
     parameters?: SingleAnalysisRequest['parameters']
   }): Promise<ApiResponse<{ batch_id: string; total_tasks: number; task_ids: string[]; mapping?: any[]; status: string }>>{
     return request.post('/api/analysis/batch', batchRequest)
+  },
+
+  // 快速批量决策：一次请求直接返回买入/卖出/持有结果
+  startQuickBatchDecision(batchRequest: {
+    title: string
+    description?: string
+    symbols?: string[]
+    stock_codes?: string[]
+    parameters?: SingleAnalysisRequest['parameters']
+  }): Promise<ApiResponse<QuickBatchDecisionResult>> {
+    return request.post('/api/analysis/batch/quick-decision', batchRequest, {
+      timeout: 600000,
+      retryCount: 0
+    } as any)
   },
 
   // 获取批次详情（兼容原有队列接口，若后续需要）
@@ -548,4 +579,3 @@ export const getStockPlaceholder = (market: string): string => {
   }
   return placeholders[market] ?? '输入股票代码'
 }
-

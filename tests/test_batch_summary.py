@@ -92,6 +92,30 @@ async def test_batch_summary_service_returns_summary_contract():
 
 
 @pytest.mark.asyncio
+async def test_batch_summary_returns_saved_quick_decision_summary():
+    saved_summary = {
+        "batch_id": "BQ1",
+        "status": "completed",
+        "items": [{"symbol": "000001", "action": "BUY"}],
+        "summary": {"action_counts": {"BUY": 1, "SELL": 0, "HOLD": 0}},
+    }
+    db = _DB(
+        batches=[{
+            "batch_id": "BQ1",
+            "user_id": "u1",
+            "batch_type": "quick_decision",
+            "results_summary": saved_summary,
+        }],
+        tasks=[],
+        reports=[],
+    )
+
+    summary = await _batch_summary_service(db).get_batch_summary("u1", "BQ1")
+
+    assert summary == saved_summary
+
+
+@pytest.mark.asyncio
 async def test_simple_analysis_service_keeps_batch_summary_wrapper(monkeypatch):
     from app.services.simple_analysis_service import SimpleAnalysisService
 

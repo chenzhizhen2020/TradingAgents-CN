@@ -81,7 +81,7 @@
       </el-table-column>
       <el-table-column prop="recommendation" label="投资建议" width="120">
         <template #default="{ row }">
-          {{ row.recommendation || '-' }}
+          {{ row.recommendation || row.action_label || actionText(row.action) || '-' }}
         </template>
       </el-table-column>
       <el-table-column prop="target_price" label="目标价格" width="120">
@@ -96,7 +96,7 @@
       </el-table-column>
       <el-table-column prop="error_message" label="失败原因" min-width="180">
         <template #default="{ row }">
-          <span class="error-text">{{ row.error_message || '-' }}</span>
+          <span class="error-text">{{ row.error_message || dataStatusText(row) || '-' }}</span>
         </template>
       </el-table-column>
     </el-table>
@@ -142,6 +142,18 @@ const rowStatusType = (status: string): 'success' | 'warning' | 'danger' | 'info
 }
 
 const rowStatusText = (status: string) => statusMap[status] || status || '-'
+
+const actionText = (action?: string | null) => {
+  if (action === 'BUY') return '买入'
+  if (action === 'SELL') return '卖出'
+  if (action === 'HOLD') return '持有'
+  return ''
+}
+
+const dataStatusText = (row: any) => {
+  if (row?.data_status === 'data_missing') return row.reasoning || '缺少行情/估值数据'
+  return ''
+}
 
 const formatPrice = (value?: number | null) => {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return '-'

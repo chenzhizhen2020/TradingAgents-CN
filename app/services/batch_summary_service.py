@@ -237,6 +237,9 @@ class BatchSummaryService:
             if not batch_doc:
                 return None
 
+            if batch_doc.get("batch_type") == "quick_decision" and batch_doc.get("results_summary"):
+                return batch_doc["results_summary"]
+
             mapping = batch_doc.get("mapping") or []
             task_ids = [item.get("task_id") for item in mapping if item.get("task_id")]
             if not task_ids:
