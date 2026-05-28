@@ -22,6 +22,7 @@ _PASSTHROUGH_KWARGS = (
     "callbacks",
     "http_client",
     "http_async_client",
+    "extra_body",
 )
 
 _PROVIDER_CONFIG = {
@@ -71,6 +72,9 @@ class OpenAIClient(BaseLLMClient):
         for key in _PASSTHROUGH_KWARGS:
             if key in self.kwargs:
                 llm_kwargs[key] = self.kwargs[key]
+
+        if self.provider == "deepseek" and self.model.startswith("deepseek-v4"):
+            llm_kwargs.setdefault("extra_body", {"thinking": {"type": "disabled"}})
 
         return NormalizedChatOpenAI(**llm_kwargs)
 

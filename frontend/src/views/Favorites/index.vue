@@ -69,6 +69,10 @@
               <el-icon><Refresh /></el-icon>
               刷新
             </el-button>
+            <el-button type="primary" @click="importToBatchAnalysis">
+              <el-icon><Files /></el-icon>
+              导入批量分析
+            </el-button>
             <!-- 只有有A股自选股时才显示同步实时行情按钮 -->
             <el-button
               v-if="hasAStocks"
@@ -507,7 +511,8 @@ import {
   Search,
   Refresh,
   Plus,
-  Download
+  Download,
+  Files
 } from '@element-plus/icons-vue'
 import { favoritesApi } from '@/api/favorites'
 import { tagsApi } from '@/api/tags'
@@ -987,6 +992,29 @@ const analyzeFavorite = (row: any) => {
   router.push({
     name: 'SingleAnalysis',
     query: { stock: row.stock_code, market: normalizeMarketForAnalysis(row.market || 'A股') }
+  })
+}
+
+const importToBatchAnalysis = () => {
+  const source = selectedStocks.value.length > 0 ? selectedStocks.value : filteredFavorites.value
+  const symbols = source
+    .map((item: FavoriteItem) => item.stock_code || item.symbol)
+    .filter((code): code is string => Boolean(code))
+
+  if (symbols.length === 0) {
+    ElMessage.warning('没有可导入的自选股')
+    return
+  }
+
+  const uniqueSymbols = Array.from(new Set(symbols))
+  if (uniqueSymbols.length > 10) {
+    ElMessage.warning('批量分析最多支持10只，请筛选或勾选10只以内')
+    return
+  }
+
+  router.push({
+    name: 'BatchAnalysis',
+    query: { stocks: uniqueSymbols.join(',') }
   })
 }
 

@@ -30,6 +30,8 @@
       </div>
     </div>
 
+    <BatchSummaryCard v-if="currentBatchSummary" :summary="currentBatchSummary" />
+
     <!-- 股票列表输入区域 -->
     <div class="analysis-container">
       <el-row :gutter="24">
@@ -290,14 +292,16 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, onMounted, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Files, TrendCharts, Check, Close } from '@element-plus/icons-vue'
 import { ANALYSTS, DEFAULT_ANALYSTS, convertAnalystNamesToIds } from '@/constants/analysts'
 import { configApi } from '@/api/config'
+import { analysisApi, type BatchSummary } from '@/api/analysis'
 import { useRouter, useRoute } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import ModelConfig from '@/components/ModelConfig.vue'
+import BatchSummaryCard from '@/components/Analysis/BatchSummaryCard.vue'
 import { getMarketByStockCode } from '@/utils/market'
 import { validateStockCode } from '@/utils/stockValidator'
 
@@ -310,6 +314,8 @@ const stockInput = ref('')
 const stockCodes = ref<string[]>([])  // 保留用于表单绑定
 const symbols = ref<string[]>([])     // 标准化后的代码列表
 const invalidCodes = ref<string[]>([])
+const currentBatchSummary = ref<BatchSummary | null>(null)
+let summaryTimer: number | null = null
 
 // 模型设置
 const modelSettings = ref({
@@ -367,6 +373,35 @@ const clearStocks = () => {
   stockCodes.value = []
   symbols.value = []
   invalidCodes.value = []
+}
+
+const stopSummaryPolling = () => {
+  if (summaryTimer !== null) {
+    window.clearInterval(summaryTimer)
+    summaryTimer = null
+  }
+}
+
+const loadBatchSummary = async (batchId: string) => {
+  if (!batchId) return
+  try {
+    const res = await analysisApi.getBatchSummary(batchId)
+    const summary = (res as any)?.data || null
+    currentBatchSummary.value = summary
+    if (summary && ['completed', 'partial_success', 'failed'].includes(summary.status)) {
+      stopSummaryPolling()
+    }
+  } catch (error) {
+    console.warn('加载批次汇总失败:', error)
+  }
+}
+
+const startSummaryPolling = (batchId: string) => {
+  stopSummaryPolling()
+  void loadBatchSummary(batchId)
+  summaryTimer = window.setInterval(() => {
+    void loadBatchSummary(batchId)
+  }, 10000)
 }
 
 // 初始化模型设置
@@ -440,6 +475,14 @@ onMounted(async () => {
     // 触发解析以更新 symbols
     parseStockCodes()
   }
+
+  if (q?.batch_id) {
+    startSummaryPolling(String(q.batch_id))
+  }
+})
+
+onUnmounted(() => {
+  stopSummaryPolling()
 })
 
 const removeStock = (index: number) => {
@@ -527,8 +570,6 @@ const submitBatchAnalysis = async () => {
       }
     }
 
-    // 调用真实的批量分析API
-    const { analysisApi } = await import('@/api/analysis')
     const response = await analysisApi.startBatchAnalysis(batchRequest)
 
     if (!response?.success) {
@@ -536,6 +577,7 @@ const submitBatchAnalysis = async () => {
     }
 
     const { batch_id, total_tasks } = response.data
+    startSummaryPolling(batch_id)
 
     // 显示成功提示并引导用户去任务中心
     ElMessageBox.confirm(

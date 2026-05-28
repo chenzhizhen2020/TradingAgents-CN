@@ -115,6 +115,67 @@ export interface AnalysisHistory {
   analyses: AnalysisResult[]
 }
 
+export interface BatchSummaryItem {
+  task_id?: string
+  report_id?: string | null
+  analysis_id?: string | null
+  report_available?: boolean
+  symbol?: string
+  stock_code?: string
+  stock_name?: string
+  status: string
+  recommendation?: string | null
+  target_price?: number | null
+  confidence?: number | null
+  error_message?: string | null
+}
+
+export interface BatchCostSummary {
+  official_available?: boolean
+  official_cost_delta_by_currency?: Record<string, number>
+  official_reason?: string | null
+  balance_warning?: string | null
+  local_estimate_available?: boolean
+  local_estimated_cost_by_currency?: Record<string, number>
+  local_estimate_reason?: string | null
+  local_estimate_source?: string | null
+  input_tokens?: number | null
+  output_tokens?: number | null
+}
+
+export interface BatchSummary {
+  batch_id: string
+  title: string
+  description?: string
+  status: string
+  total_tasks: number
+  completed_tasks: number
+  failed_tasks: number
+  pending_tasks: number
+  generated_at?: string
+  cost_summary?: BatchCostSummary
+  official_cost_delta_by_currency?: Record<string, number>
+  local_estimated_cost_by_currency?: Record<string, number>
+  items: BatchSummaryItem[]
+}
+
+export interface AnalysisBatchListItem {
+  batch_id: string
+  title: string
+  description?: string
+  status: string
+  total_tasks: number
+  completed_tasks?: number
+  failed_tasks?: number
+  progress?: number
+  cost_summary?: BatchCostSummary
+  official_cost_delta_by_currency?: Record<string, number>
+  local_estimated_cost_by_currency?: Record<string, number>
+  created_at?: string
+  updated_at?: string
+  completed_at?: string
+}
+
 // 股票分析API
 export const analysisApi = {
   // 开始分析
@@ -157,6 +218,7 @@ export const analysisApi = {
     start_date?: string
     end_date?: string
     status?: string
+    batch_id?: string
   }): Promise<any> {
     return request.get('/api/analysis/user/history', { params })
   },
@@ -190,13 +252,23 @@ export const analysisApi = {
     return request.get(`/api/analysis/batches/${batchId}`)
   },
 
+  // 获取批量分析批次列表
+  getBatchList(params?: { limit?: number; offset?: number }): Promise<ApiResponse<{ batches: AnalysisBatchListItem[]; total: number; limit: number; offset: number }>> {
+    return request.get('/api/analysis/batches', { params })
+  },
+
+  // 获取批量分析总体报告
+  getBatchSummary(batchId: string): Promise<ApiResponse<BatchSummary>> {
+    return request.get(`/api/analysis/batches/${batchId}/summary`)
+  },
+
   // 获取任务详情（兼容原有队列接口，若后续需要）
   getTaskDetails(taskId: string): Promise<any> {
     return request.get(`/api/analysis/tasks/${taskId}/details`)
   },
 
   // 获取任务列表（新版 simple service）
-  getTaskList(params?: { status?: string; limit?: number; offset?: number }): Promise<any>{
+  getTaskList(params?: { status?: string; limit?: number; offset?: number; batch_id?: string }): Promise<any>{
     return request.get('/api/analysis/tasks', { params })
   },
 
@@ -476,7 +548,4 @@ export const getStockPlaceholder = (market: string): string => {
   }
   return placeholders[market] ?? '输入股票代码'
 }
-
-
-
 

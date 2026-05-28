@@ -17,6 +17,7 @@ from app.services.queue_service import get_queue_service, QueueService
 from app.services.analysis_service import get_analysis_service
 from app.services.simple_analysis_service import get_simple_analysis_service
 from app.services.websocket_manager import get_websocket_manager
+from app.services.deepseek_balance_service import deepseek_balance_service
 from app.models.analysis import (
     SingleAnalysisRequest, BatchAnalysisRequest, AnalysisParameters,
     AnalysisTaskResponse, AnalysisBatchResponse, AnalysisHistoryQuery
@@ -739,6 +740,7 @@ async def list_all_tasks(
 async def list_user_tasks(
     user: dict = Depends(get_current_user),
     status: Optional[str] = Query(None, description="任务状态过滤"),
+    batch_id: Optional[str] = Query(None, description="批次ID过滤"),
     limit: int = Query(20, ge=1, le=100, description="返回数量限制"),
     offset: int = Query(0, ge=0, description="偏移量")
 ):
@@ -750,7 +752,8 @@ async def list_user_tasks(
             user_id=user["id"],
             status=status,
             limit=limit,
-            offset=offset
+            offset=offset,
+            batch_id=batch_id
         )
 
         return {
@@ -799,6 +802,10 @@ async def submit_batch_analysis(
         if len(stock_symbols) > MAX_BATCH_SIZE:
             raise ValueError(f"批量分析最多支持 {MAX_BATCH_SIZE} 个股票，当前提交了 {len(stock_symbols)} 个")
 
+        from app.core.database import get_mongo_db
+        db = get_mongo_db()
+        deepseek_balance_before = await deepseek_balance_service.get_balance_snapshot()
+
         # 为每只股票创建单股分析任务
         for i, symbol in enumerate(stock_symbols):
             logger.info(f"📝 [批量分析] 正在创建第 {i+1}/{len(stock_symbols)} 个任务: {symbol}")
@@ -810,7 +817,7 @@ async def submit_batch_analysis(
             )
 
             try:
-                create_res = await simple_service.create_analysis_task(user["id"], single_req)
+                create_res = await simple_service.create_analysis_task(user["id"], single_req, batch_id=batch_id)
                 task_id = create_res.get("task_id")
                 if not task_id:
                     raise RuntimeError(f"创建任务失败：未返回task_id (symbol={symbol})")
@@ -820,6 +827,29 @@ async def submit_batch_analysis(
             except Exception as create_error:
                 logger.error(f"❌ [批量分析] 创建任务失败: {symbol}, 错误: {create_error}", exc_info=True)
                 raise
+
+        await db.analysis_batches.insert_one({
+            "batch_id": batch_id,
+            "user_id": user["id"],
+            "title": request.title,
+            "description": request.description,
+            "status": "processing",
+            "total_tasks": len(task_ids),
+            "completed_tasks": 0,
+            "failed_tasks": 0,
+            "cancelled_tasks": 0,
+            "progress": 0,
+            "symbols": stock_symbols,
+            "task_ids": task_ids,
+            "mapping": mapping,
+            "parameters": request.parameters.model_dump() if request.parameters else {},
+            "results_summary": None,
+            "deepseek_balance_before": deepseek_balance_before,
+            "deepseek_balance_after": None,
+            "created_at": datetime.utcnow(),
+            "started_at": datetime.utcnow(),
+            "updated_at": datetime.utcnow(),
+        })
 
         # 🔧 使用 asyncio.create_task 实现真正的并发执行
         # 不使用 BackgroundTasks，因为它是串行执行的
@@ -850,6 +880,15 @@ async def submit_batch_analysis(
 
             # 等待所有任务完成（不阻塞响应）
             await asyncio.gather(*tasks, return_exceptions=True)
+            deepseek_balance_after = await deepseek_balance_service.get_balance_snapshot()
+            await db.analysis_batches.update_one(
+                {"batch_id": batch_id},
+                {"$set": {
+                    "deepseek_balance_after": deepseek_balance_after,
+                    "updated_at": datetime.utcnow(),
+                }}
+            )
+            await simple_service.get_batch_summary(user["id"], batch_id)
             logger.info(f"🎉 [批量分析] 所有任务执行完成: batch_id={batch_id}")
 
         # 在后台启动并发任务（不等待完成）
@@ -906,12 +945,66 @@ async def analyze_batch(
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+@router.get("/batches")
+async def list_batches(
+    user: dict = Depends(get_current_user),
+    limit: int = Query(20, ge=1, le=100, description="返回数量限制"),
+    offset: int = Query(0, ge=0, description="偏移量")
+):
+    """获取当前用户的批量分析批次列表。"""
+    try:
+        from app.core.database import get_mongo_db
+        db = get_mongo_db()
+        query = {"user_id": user["id"]}
+        total = await db.analysis_batches.count_documents(query)
+        cursor = db.analysis_batches.find(query, {"_id": 0}).sort("created_at", -1).skip(offset).limit(limit)
+
+        batches = []
+        async for doc in cursor:
+            for key in ("created_at", "started_at", "completed_at", "updated_at"):
+                value = doc.get(key)
+                if hasattr(value, "isoformat"):
+                    doc[key] = value.isoformat()
+            batches.append(doc)
+
+        return {
+            "success": True,
+            "data": {
+                "batches": batches,
+                "total": total,
+                "limit": limit,
+                "offset": offset
+            },
+            "message": "批次列表获取成功"
+        }
+    except Exception as e:
+        logger.error(f"❌ 获取批次列表失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.get("/batches/{batch_id}")
 async def get_batch(batch_id: str, user: dict = Depends(get_current_user), svc: QueueService = Depends(get_queue_service)):
     b = await svc.get_batch(batch_id)
-    if not b or b.get("user") != user["id"]:
+    if b and b.get("user") == user["id"]:
+        return b
+
+    from app.core.database import get_mongo_db
+    db = get_mongo_db()
+    b = await db.analysis_batches.find_one({"batch_id": batch_id, "user_id": user["id"]}, {"_id": 0})
+    if not b:
         raise HTTPException(status_code=404, detail="batch not found")
     return b
+
+@router.get("/batches/{batch_id}/summary")
+async def get_batch_summary(batch_id: str, user: dict = Depends(get_current_user)):
+    """获取批量分析总体报告。"""
+    summary = await get_simple_analysis_service().get_batch_summary(user["id"], batch_id)
+    if not summary:
+        raise HTTPException(status_code=404, detail="batch summary not found")
+    return {
+        "success": True,
+        "data": summary,
+        "message": "批次汇总获取成功"
+    }
 
 # 任务和批次查询端点
 # 注意：这个路由被移到了 /tasks/{task_id}/status 之后，避免路由冲突
@@ -985,6 +1078,7 @@ async def get_user_queue_status(
 async def get_user_analysis_history(
     user: dict = Depends(get_current_user),
     status: Optional[str] = Query(None, description="任务状态过滤"),
+    batch_id: Optional[str] = Query(None, description="批次ID过滤"),
     start_date: Optional[str] = Query(None, description="开始日期，YYYY-MM-DD"),
     end_date: Optional[str] = Query(None, description="结束日期，YYYY-MM-DD"),
     symbol: Optional[str] = Query(None, description="股票代码"),
@@ -1000,7 +1094,8 @@ async def get_user_analysis_history(
             user_id=user["id"],
             status=status,
             limit=page_size,
-            offset=(page - 1) * page_size
+            offset=(page - 1) * page_size,
+            batch_id=batch_id
         )
 
         # 进行基础筛选

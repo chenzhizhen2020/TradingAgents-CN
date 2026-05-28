@@ -65,6 +65,65 @@
       </el-col>
     </el-row>
 
+    <BatchSummaryCard v-if="batchSummary" :summary="batchSummary" />
+
+    <el-card class="batch-list-card" shadow="never">
+      <template #header>
+        <div class="list-header">
+          <div>
+            <h3 class="section-title">批量分析总览</h3>
+            <p class="section-desc">查看每一次批量分析的总体结果</p>
+          </div>
+          <el-button @click="refreshBatchList" :loading="batchListLoading">
+            <el-icon><Refresh /></el-icon>
+            刷新批次
+          </el-button>
+        </div>
+      </template>
+
+      <el-table :data="batchList" v-loading="batchListLoading" style="width: 100%">
+        <el-table-column prop="title" label="批次标题" min-width="180" />
+        <el-table-column prop="batch_id" label="批次ID" width="240" />
+        <el-table-column label="状态" width="110">
+          <template #default="{ row }">
+            <el-tag :type="getBatchStatusType(row.status)">{{ getBatchStatusText(row.status) }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="进度" width="160">
+          <template #default="{ row }">
+            {{ row.completed_tasks || 0 }}/{{ row.total_tasks || 0 }}
+            <span v-if="row.failed_tasks">，失败 {{ row.failed_tasks }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="本次费用" width="150">
+          <template #default="{ row }">
+            <el-tooltip
+              v-if="getBatchCostTip(row)"
+              :content="getBatchCostTip(row)"
+              placement="top"
+            >
+              <span class="batch-cost">{{ formatBatchCost(row) }}</span>
+            </el-tooltip>
+            <span v-else class="batch-cost">{{ formatBatchCost(row) }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column prop="created_at" label="创建时间" width="180">
+          <template #default="{ row }">
+            {{ formatTime(row.created_at) }}
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="240" fixed="right">
+          <template #default="{ row }">
+            <el-button type="primary" link @click="selectBatch(row)">
+              查看总体报告
+            </el-button>
+            <el-button link @click="filterByBatch(row)">
+              查看任务
+            </el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+    </el-card>
 
     <el-card class="list-card" shadow="never">
       <div class="list-header">
@@ -149,8 +208,10 @@ import { useRouter, useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { List, Refresh, Download } from '@element-plus/icons-vue'
 import { analysisApi } from '@/api/analysis'
+import type { AnalysisBatchListItem, BatchSummary } from '@/api/analysis'
 import TaskResultDialog from '@/components/Global/TaskResultDialog.vue'
 import TaskReportDialog from '@/components/Global/TaskReportDialog.vue'
+import BatchSummaryCard from '@/components/Analysis/BatchSummaryCard.vue'
 
 const router = useRouter()
 const route = useRoute()
@@ -163,6 +224,10 @@ const pageSize = ref(20)
 const total = ref(0)
 const list = ref<any[]>([])
 const selectedRows = ref<any[]>([])
+const routeBatchId = ref('')
+const batchSummary = ref<BatchSummary | null>(null)
+const batchList = ref<AnalysisBatchListItem[]>([])
+const batchListLoading = ref(false)
 // 筛选与统计
 const filters = ref<{ dateRange: string[]; market: string; status: string; stock: string }>({
   dateRange: [], market: '', status: '', stock: ''
@@ -177,8 +242,14 @@ let timer: any = null
 const setupPolling = () => {
   clearInterval(timer)
   // 定期刷新列表（每 5 秒）
-  if (activeTab.value === 'running') {
-    timer = setInterval(() => loadList(), 5000)
+  if (activeTab.value === 'running' || routeBatchId.value) {
+    timer = setInterval(() => {
+      loadList()
+      if (routeBatchId.value) {
+        void loadBatchSummary(routeBatchId.value)
+      }
+      void loadBatchList()
+    }, 5000)
   }
 }
 
@@ -258,7 +329,8 @@ const loadList = async () => {
       page: currentPage.value,
       page_size: pageSize.value,
       status: filters.value.status || statusParam.value,
-      stock_code: filters.value.stock || undefined
+      stock_code: filters.value.stock || undefined,
+      batch_id: routeBatchId.value || undefined
     }
     if (filters.value.market) params.market_type = filters.value.market
     if (filters.value.dateRange && filters.value.dateRange.length === 2) {
@@ -277,7 +349,8 @@ const loadList = async () => {
         const res2 = await analysisApi.getTaskList({
           status: statusParam.value,
           limit: pageSize.value,
-          offset: (currentPage.value - 1) * pageSize.value
+          offset: (currentPage.value - 1) * pageSize.value,
+          batch_id: routeBatchId.value || undefined
         })
         const body2 = (res2 as any)?.data?.data || {}
         tasks = body2.tasks || []
@@ -306,6 +379,50 @@ const loadList = async () => {
   } finally {
     loading.value = false
   }
+}
+
+const loadBatchSummary = async (batchId: string) => {
+  if (!batchId) {
+    batchSummary.value = null
+    return
+  }
+  try {
+    const res = await analysisApi.getBatchSummary(batchId)
+    batchSummary.value = (res as any)?.data || null
+  } catch (e) {
+    console.warn('加载批次汇总失败:', e)
+    batchSummary.value = null
+  }
+}
+
+const loadBatchList = async () => {
+  batchListLoading.value = true
+  try {
+    const res = await analysisApi.getBatchList({ limit: 20, offset: 0 })
+    const body = (res as any)?.data || {}
+    batchList.value = body.batches || []
+  } catch (e) {
+    console.warn('加载批次列表失败:', e)
+    batchList.value = []
+  } finally {
+    batchListLoading.value = false
+  }
+}
+
+const refreshBatchList = () => {
+  void loadBatchList()
+}
+
+const selectBatch = async (row: AnalysisBatchListItem) => {
+  routeBatchId.value = row.batch_id
+  await loadBatchSummary(row.batch_id)
+}
+
+const filterByBatch = (row: AnalysisBatchListItem) => {
+  routeBatchId.value = row.batch_id
+  currentPage.value = 1
+  void loadBatchSummary(row.batch_id)
+  loadList()
 }
 
 // 查询/重置
@@ -493,6 +610,11 @@ onMounted(() => {
   if (validTabs.includes(tab)) {
     activeTab.value = tab as any
   }
+  routeBatchId.value = String((route.query as any)?.batch_id || '')
+  if (routeBatchId.value) {
+    void loadBatchSummary(routeBatchId.value)
+  }
+  void loadBatchList()
   loadList(); setupPolling()
 })
 
@@ -506,6 +628,17 @@ watch(() => (route.query as any)?.tab, (newVal) => {
     loadList()
     setupPolling()
   }
+})
+watch(() => (route.query as any)?.batch_id, (newVal) => {
+  routeBatchId.value = String(newVal || '')
+  currentPage.value = 1
+  if (routeBatchId.value) {
+    void loadBatchSummary(routeBatchId.value)
+  } else {
+    batchSummary.value = null
+  }
+  loadList()
+  setupPolling()
 })
 onUnmounted(() => {
   clearInterval(timer)
@@ -521,7 +654,51 @@ const getStatusType = (status:string): 'success' | 'info' | 'warning' | 'danger'
 import { formatDateTime } from '@/utils/datetime'
 
 const getStatusText = (status:string) => ({ pending:'等待中', processing:'处理中', completed:'已完成', failed:'失败', cancelled:'已取消' } as any)[status] || status
+const getBatchStatusType = (status:string): 'success' | 'info' | 'warning' | 'danger' => {
+  const map: Record<string,'success'|'info'|'warning'|'danger'> = {
+    pending: 'info',
+    submitted: 'info',
+    processing: 'warning',
+    running: 'warning',
+    completed: 'success',
+    partial_success: 'warning',
+    failed: 'danger',
+    cancelled: 'info'
+  }
+  return map[status] || 'info'
+}
+const getBatchStatusText = (status:string) => ({
+  pending:'等待中',
+  submitted:'已提交',
+  processing:'处理中',
+  running:'处理中',
+  completed:'已完成',
+  partial_success:'部分成功',
+  failed:'失败',
+  cancelled:'已取消'
+} as any)[status] || status
 const formatTime = (t:string) => t ? formatDateTime(t) : '-'
+const isTerminalBatch = (status: string) => ['completed', 'partial_success', 'failed'].includes(status)
+const formatCurrencyMap = (value?: Record<string, number>) => {
+  const entries = Object.entries(value || {}).filter(([, amount]) => Number.isFinite(Number(amount)))
+  if (!entries.length) return ''
+  return entries
+    .map(([currency, amount]) => `${currency === 'CNY' ? '¥' : `${currency} `}${Number(amount).toFixed(4)}`)
+    .join(' / ')
+}
+const formatBatchCost = (row: AnalysisBatchListItem) => {
+  if (!isTerminalBatch(row.status)) return '计算中'
+  const official = formatCurrencyMap(row.cost_summary?.official_cost_delta_by_currency || row.official_cost_delta_by_currency)
+  if (row.cost_summary?.official_available && official) return official
+  return '未获取'
+}
+const getBatchCostTip = (row: AnalysisBatchListItem) => {
+  if (!isTerminalBatch(row.status)) return ''
+  const reason = row.cost_summary?.official_reason
+  const warning = row.cost_summary?.balance_warning
+  const local = formatCurrencyMap(row.cost_summary?.local_estimated_cost_by_currency || row.local_estimated_cost_by_currency)
+  return [warning, reason, local ? `本地估算：${local}` : ''].filter(Boolean).join('；')
+}
 </script>
 
 <style scoped lang="scss">
@@ -530,8 +707,11 @@ const formatTime = (t:string) => t ? formatDateTime(t) : '-'
   .page-title { display:flex; align-items:center; gap:8px; font-size:24px; font-weight:600; margin:0 0 8px 0; }
   .page-description { color: var(--el-text-color-regular); margin:0; }
   .tabs-card { margin-bottom: 16px; }
+  .batch-list-card { margin-top: 16px; }
   .list-header { display:flex; justify-content: space-between; align-items: center; margin-bottom: 12px; gap:8px; }
+  .section-title { margin: 0; font-size: 18px; font-weight: 600; }
+  .section-desc { margin: 4px 0 0; color: var(--el-text-color-secondary); font-size: 13px; }
+  .batch-cost { font-weight: 600; color: var(--el-text-color-primary); }
   .pagination-wrapper { display:flex; justify-content:center; margin-top: 16px; }
 }
 </style>
-

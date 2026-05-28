@@ -3,7 +3,7 @@
 # 支持多架构: amd64, arm64
 
 # 使用 Debian Bookworm (稳定版) 而不是 Trixie (测试版)
-FROM python:3.10-slim-bookworm
+FROM m.daocloud.io/docker.io/library/python:3.10-slim-bookworm
 
 # 获取构建架构信息
 ARG TARGETARCH
