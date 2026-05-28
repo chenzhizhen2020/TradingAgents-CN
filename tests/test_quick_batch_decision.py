@@ -52,6 +52,19 @@ def _request(symbols):
     )
 
 
+def _deep_request(symbols):
+    return BatchAnalysisRequest(
+        title="深度批量决策",
+        symbols=symbols,
+        parameters={
+            "research_depth": "深度",
+            "selected_analysts": ["market", "fundamentals", "news", "social"],
+            "quick_analysis_model": "qwen-turbo",
+            "deep_analysis_model": "qwen-max",
+        },
+    )
+
+
 async def _llm_json(_rows, _model_name, _parameters):
     return """
     {
@@ -97,18 +110,104 @@ async def test_quick_batch_decision_runs_multi_agent_discussion_over_entire_batc
     assert [call["role_key"] for call in calls] == [
         "market_analyst",
         "fundamentals_analyst",
+        "news_analyst",
+        "social_analyst",
         "bull_researcher",
         "bear_researcher",
+        "research_manager",
+        "trader",
+        "risky_analyst",
+        "safe_analyst",
+        "neutral_analyst",
+        "risky_analyst",
+        "safe_analyst",
+        "neutral_analyst",
         "risk_manager",
-        "portfolio_manager",
     ]
     assert all(call["symbols"] == ["000001", "000002"] for call in calls)
-    assert calls[-1]["prior_discussion_count"] == 5
+    assert calls[-1]["prior_discussion_count"] == 14
     assert calls[-1]["final"] is True
-    assert result["summary"]["discussion_rounds"] == 6
-    assert result["summary"]["discussion_agents"] == ["市场分析师", "基本面分析师", "看多研究员", "看空研究员", "风险经理", "组合决策员"]
-    assert len(result["discussion_trace"]) == 6
+    assert result["summary"]["discussion_rounds"] == 15
+    assert result["summary"]["discussion_agents"] == [
+        "市场分析师",
+        "基本面分析师",
+        "新闻分析师",
+        "情绪分析师",
+        "看多研究员",
+        "看空研究员",
+        "研究经理",
+        "交易员",
+        "激进风险评估",
+        "保守风险评估",
+        "中性风险评估",
+        "激进风险评估",
+        "保守风险评估",
+        "中性风险评估",
+        "风险经理",
+    ]
+    assert len(result["discussion_trace"]) == 15
     assert db.analysis_batches.inserted[0]["results_summary"]["discussion_trace"] == result["discussion_trace"]
+
+
+@pytest.mark.asyncio
+async def test_quick_batch_decision_uses_single_stock_style_deep_discussion_rounds():
+    db = _DB(
+        screening_docs=[
+            {"code": "000001", "name": "平安银行", "close": 12.3, "pct_chg": 1.2, "pe": 6.1, "pb": 0.8},
+            {"code": "000002", "name": "万科A", "close": 8.4, "pct_chg": -2.4, "pe": 9.2, "pb": 0.6},
+        ]
+    )
+    calls = []
+
+    async def agent_llm(role_key, _role_name, rows, discussion, model_name, _parameters, final=False):
+        calls.append({
+            "role_key": role_key,
+            "symbols": [row["symbol"] for row in rows],
+            "model_name": model_name,
+            "prior_discussion_count": len(discussion),
+            "final": final,
+        })
+        if final:
+            return {
+                "items": [
+                    {"symbol": "000001", "action": "BUY", "confidence": 0.82, "target_price": 13.1, "reasoning": "深度讨论后相对更优"},
+                    {"symbol": "000002", "action": "SELL", "confidence": 0.77, "target_price": 7.2, "reasoning": "深度讨论后风险更高"},
+                ]
+            }
+        return f"{role_key} 批量讨论"
+
+    service = QuickBatchDecisionService(db_getter=lambda: db, agent_llm=agent_llm)
+
+    result = await service.run("u1", _deep_request(["000001", "000002"]))
+
+    expected_roles = [
+        "market_analyst",
+        "fundamentals_analyst",
+        "news_analyst",
+        "social_analyst",
+        "bull_researcher",
+        "bear_researcher",
+        "bull_researcher",
+        "bear_researcher",
+        "research_manager",
+        "trader",
+        "risky_analyst",
+        "safe_analyst",
+        "neutral_analyst",
+        "risky_analyst",
+        "safe_analyst",
+        "neutral_analyst",
+        "risk_manager",
+    ]
+    assert [call["role_key"] for call in calls] == expected_roles
+    assert all(call["symbols"] == ["000001", "000002"] for call in calls)
+    assert calls[-1]["final"] is True
+    assert calls[-1]["prior_discussion_count"] == len(expected_roles) - 1
+    deep_roles = {"research_manager", "risk_manager"}
+    assert all(call["model_name"] == "qwen-max" for call in calls if call["role_key"] in deep_roles)
+    assert all(call["model_name"] == "qwen-turbo" for call in calls if call["role_key"] not in deep_roles)
+    assert result["summary"]["discussion_rounds"] == len(expected_roles)
+    assert result["summary"]["discussion_agents"][-1] == "风险经理"
 
 
 @pytest.mark.asyncio

@@ -51,7 +51,8 @@
       </template>
 
       <div class="quick-model-line">
-        <span>模型：{{ quickDecisionResult.summary?.model_name || '-' }}</span>
+        <span>快速模型：{{ quickDecisionResult.summary?.model_name || '-' }}</span>
+        <span>深度模型：{{ quickDecisionResult.summary?.deep_model_name || '-' }}</span>
         <span>讨论：{{ quickDecisionResult.summary?.discussion_rounds || 0 }} 轮</span>
         <span>耗时：{{ formatElapsed(quickDecisionResult.summary?.elapsed_seconds) }}</span>
         <span>生成时间：{{ formatGeneratedAt(quickDecisionResult.summary?.generated_at) }}</span>

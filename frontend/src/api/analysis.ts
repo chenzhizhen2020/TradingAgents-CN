@@ -171,6 +171,7 @@ export interface QuickBatchDecisionResult extends BatchSummary {
   summary: {
     action_counts: Record<'BUY' | 'SELL' | 'HOLD', number>
     model_name: string
+    deep_model_name?: string
     discussion_rounds?: number
     discussion_agents?: string[]
     elapsed_seconds: number

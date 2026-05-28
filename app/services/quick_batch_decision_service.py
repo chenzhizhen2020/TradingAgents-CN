@@ -46,7 +46,7 @@ class QuickBatchDecisionService:
             raise ValueError(f"快速批量决策最多支持 {self.max_symbols} 只股票")
 
         db = (self._db_getter or get_mongo_db)()
-        model_name = self._resolve_model_name(request)
+        quick_model_name, deep_model_name = self._resolve_model_names(request)
         parameters = request.parameters.model_dump() if request.parameters else {}
         batch_id = str(uuid.uuid4())
 
@@ -60,7 +60,12 @@ class QuickBatchDecisionService:
         decision_map: Dict[str, Dict[str, Any]] = {}
         discussion_trace: List[Dict[str, str]] = []
         if available_rows:
-            raw_decision, discussion_trace = await self._decide_with_agents(available_rows, model_name, parameters)
+            raw_decision, discussion_trace = await self._decide_with_agents(
+                available_rows,
+                quick_model_name,
+                deep_model_name,
+                parameters,
+            )
             decision_map = self._parse_llm_decisions(raw_decision)
 
         items: List[Dict[str, Any]] = []
@@ -91,7 +96,8 @@ class QuickBatchDecisionService:
             "items": items,
             "summary": {
                 "action_counts": self._count_actions(items),
-                "model_name": model_name,
+                "model_name": quick_model_name,
+                "deep_model_name": deep_model_name,
                 "discussion_rounds": len(discussion_trace),
                 "discussion_agents": [entry["agent"] for entry in discussion_trace],
                 "elapsed_seconds": round(time.perf_counter() - started, 3),
@@ -135,10 +141,16 @@ class QuickBatchDecisionService:
                 symbols.append(symbol)
         return symbols
 
-    def _resolve_model_name(self, request: BatchAnalysisRequest) -> str:
+    def _resolve_model_names(self, request: BatchAnalysisRequest) -> tuple[str, str]:
         params = request.parameters
-        model_name = getattr(params, "quick_analysis_model", None) if params else None
-        return model_name or "qwen-turbo"
+        quick_model_name = getattr(params, "quick_analysis_model", None) if params else None
+        deep_model_name = getattr(params, "deep_analysis_model", None) if params else None
+        quick_model_name = quick_model_name or "qwen-turbo"
+        return quick_model_name, deep_model_name or quick_model_name
+
+    def _resolve_model_name(self, request: BatchAnalysisRequest) -> str:
+        quick_model_name, _ = self._resolve_model_names(request)
+        return quick_model_name
 
     async def _load_stock_data(self, db: Any, symbols: List[str]) -> Dict[str, Dict[str, Any]]:
         data: Dict[str, Dict[str, Any]] = {}
@@ -191,11 +203,12 @@ class QuickBatchDecisionService:
     async def _decide_with_agents(
         self,
         rows: List[Dict[str, Any]],
-        model_name: str,
+        quick_model_name: str,
+        deep_model_name: str,
         parameters: Dict[str, Any],
     ) -> tuple[Any, List[Dict[str, str]]]:
         if self._llm_decider:
-            raw_decision = await self._llm_decider(rows, model_name, parameters)
+            raw_decision = await self._llm_decider(rows, quick_model_name, parameters)
             return raw_decision, [{
                 "agent": "组合决策员",
                 "role": "portfolio_manager",
@@ -213,7 +226,7 @@ class QuickBatchDecisionService:
                 role["name"],
                 rows,
                 discussion,
-                model_name,
+                deep_model_name if role.get("model") == "deep" else quick_model_name,
                 parameters,
                 final=is_final,
             )
@@ -229,44 +242,133 @@ class QuickBatchDecisionService:
         return raw_decision, discussion
 
     def _discussion_roles(self, parameters: Dict[str, Any]) -> List[Dict[str, str]]:
-        analyst_roles = [
-            {
+        analyst_map = {
+            "market": {
                 "key": "market_analyst",
                 "name": "市场分析师",
                 "instruction": "从价格、涨跌幅、成交额、换手率、量比等维度横向比较整批股票，指出相对强弱和异常信号。",
             },
-            {
+            "fundamentals": {
                 "key": "fundamentals_analyst",
                 "name": "基本面分析师",
                 "instruction": "从 PE、PE_TTM、PB、市值等估值指标横向比较整批股票，指出估值优势、估值陷阱和缺失信息。",
             },
+            "news": {
+                "key": "news_analyst",
+                "name": "新闻分析师",
+                "instruction": "在已有行情/估值数据有限的前提下，指出整批股票需要关注的事件催化、政策和行业新闻风险；不得编造具体新闻。",
+            },
+            "social": {
+                "key": "social_analyst",
+                "name": "情绪分析师",
+                "instruction": "从市场情绪、资金偏好和短期交易热度角度横向比较整批股票；数据不足时明确说明不确定性。",
+            },
+        }
+        selected = parameters.get("selected_analysts") or ["market", "fundamentals", "news", "social"]
+        analyst_roles = [
+            {**analyst_map[key], "model": "quick"}
+            for key in selected
+            if key in analyst_map
         ]
-        debate_roles = [
+        if not analyst_roles:
+            analyst_roles = [
+                {**analyst_map["market"], "model": "quick"},
+                {**analyst_map["fundamentals"], "model": "quick"},
+            ]
+
+        max_debate_rounds, max_risk_discuss_rounds = self._discussion_round_settings(parameters)
+
+        debate_roles: List[Dict[str, str]] = []
+        for _ in range(max_debate_rounds):
+            debate_roles.extend([
+                {
+                    "key": "bull_researcher",
+                    "name": "看多研究员",
+                    "instruction": "基于前面分析，为整批股票中最值得买入或持有的标的提出看多论据，并比较排序。",
+                    "model": "quick",
+                },
+                {
+                    "key": "bear_researcher",
+                    "name": "看空研究员",
+                    "instruction": "基于前面分析，为整批股票中应卖出或回避的标的提出看空论据，并指出主要风险。",
+                    "model": "quick",
+                },
+            ])
+
+        middle_roles = [
             {
-                "key": "bull_researcher",
-                "name": "看多研究员",
-                "instruction": "基于前面分析，为整批股票中最值得买入或持有的标的提出看多论据，并比较排序。",
+                "key": "research_manager",
+                "name": "研究经理",
+                "instruction": "综合分析师报告和多空辩论，为整批股票形成研究共识、排序和关键分歧。",
+                "model": "deep",
             },
             {
-                "key": "bear_researcher",
-                "name": "看空研究员",
-                "instruction": "基于前面分析，为整批股票中应卖出或回避的标的提出看空论据，并指出主要风险。",
-            },
-        ]
-        risk_roles = [
-            {
-                "key": "risk_manager",
-                "name": "风险经理",
-                "instruction": "综合多空观点，对整批股票做风险校验，指出哪些结论证据不足、哪些需要降置信度。",
-            },
-            {
-                "key": "portfolio_manager",
-                "name": "组合决策员",
-                "instruction": "综合所有角色讨论，为每只股票输出最终 BUY、SELL 或 HOLD，必须覆盖全部可用股票。",
+                "key": "trader",
+                "name": "交易员",
+                "instruction": "把研究共识转成整批股票的交易计划，说明仓位优先级、买卖触发点和不交易条件。",
+                "model": "quick",
             },
         ]
 
-        return analyst_roles + debate_roles + risk_roles
+        risk_roles: List[Dict[str, str]] = []
+        for _ in range(max_risk_discuss_rounds):
+            risk_roles.extend([
+                {
+                    "key": "risky_analyst",
+                    "name": "激进风险评估",
+                    "instruction": "从激进收益角度审视交易员计划，指出哪些股票值得承担风险，以及收益风险比依据。",
+                    "model": "quick",
+                },
+                {
+                    "key": "safe_analyst",
+                    "name": "保守风险评估",
+                    "instruction": "从保守防守角度审视交易员计划，指出应卖出、回避或降低置信度的股票。",
+                    "model": "quick",
+                },
+                {
+                    "key": "neutral_analyst",
+                    "name": "中性风险评估",
+                    "instruction": "从中性平衡角度校验激进和保守观点，给出折中风险判断。",
+                    "model": "quick",
+                },
+            ])
+
+        final_role = [{
+            "key": "risk_manager",
+            "name": "风险经理",
+            "instruction": "综合所有讨论，做最终风控裁决，并为每只股票输出 BUY、SELL 或 HOLD。",
+            "model": "deep",
+        }]
+
+        return analyst_roles + debate_roles + middle_roles + risk_roles + final_role
+
+    def _discussion_round_settings(self, parameters: Dict[str, Any]) -> tuple[int, int]:
+        depth = self._normalize_research_depth(parameters.get("research_depth"))
+        if depth in {"快速", "基础"}:
+            return 1, 1
+        if depth == "深度":
+            return 2, 2
+        if depth == "全面":
+            return 3, 3
+        return 1, 2
+
+    def _normalize_research_depth(self, raw_depth: Any) -> str:
+        numeric_to_chinese = {
+            1: "快速",
+            2: "基础",
+            3: "标准",
+            4: "深度",
+            5: "全面",
+        }
+        if isinstance(raw_depth, (int, float)):
+            return numeric_to_chinese.get(int(raw_depth), "标准")
+        if isinstance(raw_depth, str):
+            depth = raw_depth.strip()
+            if depth.isdigit():
+                return numeric_to_chinese.get(int(depth), "标准")
+            if depth in {"快速", "基础", "标准", "深度", "全面"}:
+                return depth
+        return "标准"
 
     async def _call_agent(
         self,
