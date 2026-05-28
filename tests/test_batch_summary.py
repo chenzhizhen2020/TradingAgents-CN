@@ -1,6 +1,6 @@
 import pytest
 
-from app.services.simple_analysis_service import SimpleAnalysisService
+from app.services.batch_summary_service import BatchSummaryService
 
 
 class _AsyncCursor:
@@ -57,10 +57,12 @@ class _DB:
             self.token_usage = _Collection(token_usage)
 
 
-@pytest.mark.asyncio
-async def test_batch_summary_service_returns_summary_contract(monkeypatch):
-    from app.services.batch_summary_service import BatchSummaryService
+def _batch_summary_service(db):
+    return BatchSummaryService(db_getter=lambda: db)
 
+
+@pytest.mark.asyncio
+async def test_batch_summary_service_returns_summary_contract():
     db = _DB(
         batches=[{
             "batch_id": "B0",
@@ -79,9 +81,8 @@ async def test_batch_summary_service_returns_summary_contract(monkeypatch):
         }],
         reports=[],
     )
-    monkeypatch.setattr("app.services.batch_summary_service.get_mongo_db", lambda: db)
 
-    summary = await BatchSummaryService().get_batch_summary("u1", "B0")
+    summary = await _batch_summary_service(db).get_batch_summary("u1", "B0")
 
     assert summary["batch_id"] == "B0"
     assert summary["status"] == "completed"
@@ -91,7 +92,37 @@ async def test_batch_summary_service_returns_summary_contract(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_batch_summary_counts_partial_success_and_extracts_fields(monkeypatch):
+async def test_simple_analysis_service_keeps_batch_summary_wrapper(monkeypatch):
+    from app.services.simple_analysis_service import SimpleAnalysisService
+
+    db = _DB(
+        batches=[{
+            "batch_id": "B-wrapper",
+            "user_id": "u1",
+            "title": "兼容包装",
+            "total_tasks": 1,
+            "mapping": [{"task_id": "T1", "symbol": "000001"}],
+        }],
+        tasks=[{
+            "task_id": "T1",
+            "batch_id": "B-wrapper",
+            "stock_code": "000001",
+            "status": "completed",
+            "result": {"decision": {"action": "BUY"}},
+        }],
+        reports=[],
+    )
+    monkeypatch.setattr("app.services.simple_analysis_service.get_mongo_db", lambda: db)
+    service = SimpleAnalysisService.__new__(SimpleAnalysisService)
+
+    summary = await service.get_batch_summary("u1", "B-wrapper")
+
+    assert summary["batch_id"] == "B-wrapper"
+    assert summary["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_batch_summary_counts_partial_success_and_extracts_fields():
     db = _DB(
         batches=[{
             "batch_id": "B1",
@@ -126,10 +157,8 @@ async def test_batch_summary_counts_partial_success_and_extracts_fields(monkeypa
         ],
         reports=[],
     )
-    monkeypatch.setattr("app.services.simple_analysis_service.get_mongo_db", lambda: db)
-    service = SimpleAnalysisService.__new__(SimpleAnalysisService)
 
-    summary = await service.get_batch_summary("u1", "B1")
+    summary = await _batch_summary_service(db).get_batch_summary("u1", "B1")
 
     assert summary["status"] == "partial_success"
     assert summary["completed_tasks"] == 1
@@ -142,7 +171,7 @@ async def test_batch_summary_counts_partial_success_and_extracts_fields(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_batch_summary_uses_report_decision_before_task_result(monkeypatch):
+async def test_batch_summary_uses_report_decision_before_task_result():
     db = _DB(
         batches=[{
             "batch_id": "B2",
@@ -167,10 +196,8 @@ async def test_batch_summary_uses_report_decision_before_task_result(monkeypatch
             "confidence_score": 0.66,
         }],
     )
-    monkeypatch.setattr("app.services.simple_analysis_service.get_mongo_db", lambda: db)
-    service = SimpleAnalysisService.__new__(SimpleAnalysisService)
 
-    summary = await service.get_batch_summary("u1", "B2")
+    summary = await _batch_summary_service(db).get_batch_summary("u1", "B2")
 
     item = summary["items"][0]
     assert summary["status"] == "completed"
@@ -180,7 +207,7 @@ async def test_batch_summary_uses_report_decision_before_task_result(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_batch_summary_includes_report_link_and_balance_delta(monkeypatch):
+async def test_batch_summary_includes_report_link_and_balance_delta():
     db = _DB(
         batches=[{
             "batch_id": "B3",
@@ -212,10 +239,8 @@ async def test_batch_summary_includes_report_link_and_balance_delta(monkeypatch)
             "decision": {"action": "BUY"},
         }],
     )
-    monkeypatch.setattr("app.services.simple_analysis_service.get_mongo_db", lambda: db)
-    service = SimpleAnalysisService.__new__(SimpleAnalysisService)
 
-    summary = await service.get_batch_summary("u1", "B3")
+    summary = await _batch_summary_service(db).get_batch_summary("u1", "B3")
 
     item = summary["items"][0]
     assert item["report_available"] is True
@@ -226,7 +251,7 @@ async def test_batch_summary_includes_report_link_and_balance_delta(monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_batch_summary_warns_when_balance_increases(monkeypatch):
+async def test_batch_summary_warns_when_balance_increases():
     db = _DB(
         batches=[{
             "batch_id": "B4",
@@ -252,10 +277,8 @@ async def test_batch_summary_warns_when_balance_increases(monkeypatch):
         }],
         reports=[],
     )
-    monkeypatch.setattr("app.services.simple_analysis_service.get_mongo_db", lambda: db)
-    service = SimpleAnalysisService.__new__(SimpleAnalysisService)
 
-    summary = await service.get_batch_summary("u1", "B4")
+    summary = await _batch_summary_service(db).get_batch_summary("u1", "B4")
 
     assert summary["cost_summary"]["official_available"] is True
     assert summary["cost_summary"]["official_cost_delta_by_currency"] == {"CNY": 0.0}
